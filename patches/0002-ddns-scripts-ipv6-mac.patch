@@ -1,0 +1,151 @@
+diff --git a/net/ddns-scripts/files/usr/lib/ddns/dynamic_dns_functions.sh b/net/ddns-scripts/files/usr/lib/ddns/dynamic_dns_functions.sh
+--- a/net/ddns-scripts/files/usr/lib/ddns/dynamic_dns_functions.sh
++++ b/net/ddns-scripts/files/usr/lib/ddns/dynamic_dns_functions.sh
+@@ -854,6 +854,81 @@
+ 	fi
+ }
+ 
++get_ipv6_by_mac() {
++	# $1	Name of Variable to store the selected IPv6 address
++	local __IP_VAR="$1"
++	local __MAC __CANDIDATES __ADDR
++
++	[ -z "$__IP_VAR" ] && {
++		write_log 12 "get_ipv6_by_mac: Missing variable name for IPv6 storage"
++		return 1
++	}
++
++	[ "$use_ipv6" -eq 1 ] || {
++		write_log 12 "get_ipv6_by_mac: MAC source is only valid for IPv6"
++		return 2
++	}
++
++	[ -n "$ip_mac" ] || {
++		write_log 12 "get_ipv6_by_mac: 'ip_mac' not set for source 'mac'"
++		return 2
++	}
++
++	case "$ip_mac" in
++		[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f])
++			;;
++		*)
++			write_log 12 "get_ipv6_by_mac: Invalid MAC address '$ip_mac'"
++			return 2
++			;;
++	esac
++
++	write_log 7 "MAC address: $ip_mac"
++
++	__MAC=$(printf '%s' "$ip_mac" | tr '[:upper:]' '[:lower:]')
++	__CANDIDATES=$(ip -6 neigh show 2>/dev/null |
++		awk -v mac="$__MAC" -v allow_private="$upd_privateip" '
++			{
++				addr = tolower($1);
++				state = toupper($6);
++
++				if (NF < 6 || tolower($5) != mac)
++					next;
++
++				if (addr == "::" || addr == "::1" ||
++				    addr ~ /^fe[89ab]/ || addr ~ /^ff/)
++					next;
++
++				if (!allow_private && (addr ~ /^fc/ || addr ~ /^fd/))
++					next;
++
++				if (state == "REACHABLE")
++					rank = 0;
++				else if (state == "DELAY")
++					rank = 1;
++				else if (state == "PROBE")
++					rank = 2;
++				else
++					next;
++
++				print rank "\t" addr;
++			}
++		' |
++		sort -n -k1,1 -k2,2 |
++		head -n 1 |
++		cut -f2-)
++
++	[ -n "$__CANDIDATES" ] || {
++		write_log 3 "No active IPv6 neighbor found for MAC '$ip_mac'"
++		return 1
++	}
++
++	__ADDR="$__CANDIDATES"
++	eval "$__IP_VAR=\$__ADDR"
++	write_log 7 "Found IPv6 address: $__ADDR"
++	return 0
++}
++
+ get_current_ip () {
+ 	# $1	Name of Variable to store current IP
+ 	local ip_var data retries
+@@ -878,6 +953,14 @@
+ 			[ "$use_ipv6" -eq 1 ] && network_get_ipaddr6 data "$ip_network" 2>/dev/null
+ 			[ -n "$data" ] && write_log 7 "Current IP '$data' detected on network '$ip_network'"
+ 			;;
++		"mac")
++			[ "$use_ipv6" -eq 1 ] || {
++				write_log 12 "get_current_ip: source 'mac' requires IPv6"
++				return 2
++			}
++			get_ipv6_by_mac data
++			[ -n "$data" ] && write_log 7 "Current IPv6 '$data' detected for MAC '$ip_mac'"
++			;;
+ 		"interface")
+ 			[ -z "$ip_interface" ] && { write_log 12 "get_current_ip: 'ip_interface' not set for source 'interface'"; return 2; }
+ 			# Test for alias interfaces e.g. "@wan6"; get the effective layer 3 interface
+diff --git a/net/ddns-scripts/files/usr/lib/ddns/dynamic_dns_lucihelper.sh b/net/ddns-scripts/files/usr/lib/ddns/dynamic_dns_lucihelper.sh
+--- a/net/ddns-scripts/files/usr/lib/ddns/dynamic_dns_lucihelper.sh
++++ b/net/ddns-scripts/files/usr/lib/ddns/dynamic_dns_lucihelper.sh
+@@ -33,6 +33,7 @@
+  -d DNS-SERVER       => dns_server=SERVER[:PORT]
+  -f                  => force_ipversion=1   (default 0)
+  -g                  => is_glue=1           (default 0)
++ -m MAC              => ip_mac=MAC; ip_source="mac" (IPv6 only)
+  -i INTERFACE        => ip_interface=INTERFACE; ip_source="interface"
+  -l FQDN             => lookup_host=FQDN
+  -n NETWORK          => ip_network=NETWORK; ip_source="network"
+@@ -70,12 +71,13 @@
+ is_glue=0		# Is glue record - default 0 - No
+ use_https=0		# not needed but must be set
+ 
+-while getopts ":6d:fghi:l:n:p:s:S:tu:Lv:V" OPT; do
++while getopts ":6d:fghmi:l:n:p:s:S:tu:Lv:V" OPT; do
+ 	case "$OPT" in
+ 		6)	use_ipv6=1;;
+ 		d)	dns_server="$OPTARG";;
+ 		f)	force_ipversion=1;;
+ 		g)	is_glue=1;;
++		m)	ip_mac="$OPTARG"; ip_source="mac";;
+ 		i)	ip_interface="$OPTARG"; ip_source="interface";;
+ 		l)	lookup_host="$OPTARG";;
+ 		n)	ip_network="$OPTARG"; ip_source="network";;
+diff --git a/net/ddns-scripts/samples/ddns.config_sample b/net/ddns-scripts/samples/ddns.config_sample
+--- a/net/ddns-scripts/samples/ddns.config_sample
++++ b/net/ddns-scripts/samples/ddns.config_sample
+@@ -185,7 +185,8 @@
+ 
+ 	###########
+ 	# you need to specify how ddns-scripts should detect you current local ip.
+-	# the ip_source could be set to "network", "web", "interface" or "script"
++	# the ip_source could be set to "network", "web", "interface", "script"
++	# or "mac" (IPv6 only)
+ 	# the parameters below specifying the additional information needed for
+ 	# the corresponding ip_spource configuration
+ 	# default: "network"
+@@ -221,6 +222,11 @@
+ #	option ip_source "script"
+ #	option ip_script ""
+ 
++	# ip_source "mac" is IPv6-only and uses option ip_mac to find the
++	# current IPv6 neighbor address belonging to the configured MAC.
++#	option ip_source "mac"
++#	option ip_mac ""
++
+ 	# This option can be used in combination with ip_source "web" and ip_url.
+ 	# It adds a given user agent string to the request.
+ 	# Will only be used when wget or wget-ssl is installed.
