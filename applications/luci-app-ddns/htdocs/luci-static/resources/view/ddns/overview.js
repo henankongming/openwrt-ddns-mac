@@ -245,12 +245,14 @@ return view.extend({
 			this.callDDnsGetEnv(),
 			this.callGenServiceList(),
 			this.callGetWanInterface(),
+			L.resolveDefault(network.getHostHints(), null),
 			uci.load('ddns'),
 		]);
 	},
 
-	render([resolved, status, env,  , wan_interface]) {
+	render([resolved, status, env,  , wan_interface, host_hints]) {
 		this.status = status;
+		this.host_hints = host_hints;
 		const logdir = uci.get('ddns', 'global', 'ddns_logdir') || "/var/log/ddns";
 
 		let _this = this;
@@ -659,7 +661,14 @@ return view.extend({
 				};
 
 				service_name.onchange = L.bind(_this.handleCheckService, _this, s, service_name, use_ipv6);
-				use_ipv6.onchange = L.bind(_this.handleCheckService, _this, s, service_name, use_ipv6);
+				use_ipv6.onchange = function(section_id, ev) {
+					if (use_ipv6.formvalue(section_id) != '1' &&
+					    uci.get('ddns', section_id, 'ip_source') == 'mac') {
+						uci.set('ddns', section_id, 'ip_source', 'network');
+						uci.unset('ddns', section_id, 'ip_mac');
+					}
+					return _this.handleCheckService(s, service_name, use_ipv6, ev, section_id);
+				};
 
 				if (!s.service_available) {
 					o = s.taboption('basic', form.Button, '_download_service');
@@ -800,7 +809,51 @@ return view.extend({
 					};
 
 
-					o = s.taboption('advanced', form.ListValue, 'ip_source',
+					const writeIPSource = function(section_id, formvalue) {
+						switch(formvalue) {
+							case 'network':
+								uci.unset('ddns', section_id, "ip_url");
+								uci.unset('ddns', section_id, "ip_interface");
+								uci.unset('ddns', section_id, "ip_script");
+								uci.unset('ddns', section_id, "ip_mac");
+								break;
+							case 'web':
+								uci.unset('ddns', section_id, "ip_network");
+								uci.unset('ddns', section_id, "ip_interface");
+								uci.unset('ddns', section_id, "ip_script");
+								uci.unset('ddns', section_id, "ip_mac");
+								break;
+							case 'interface':
+								uci.unset('ddns', section_id, "ip_network");
+								uci.unset('ddns', section_id, "ip_url");
+								uci.unset('ddns', section_id, "ip_script");
+								uci.unset('ddns', section_id, "ip_mac");
+								break;
+							case 'script':
+								uci.unset('ddns', section_id, "ip_network");
+								uci.unset('ddns', section_id, "ip_url");
+								uci.unset('ddns', section_id, "ip_interface");
+								uci.unset('ddns', section_id, "ip_mac");
+								break;
+							case 'mac':
+								uci.unset('ddns', section_id, "ip_network");
+								uci.unset('ddns', section_id, "ip_url");
+								uci.unset('ddns', section_id, "ip_interface");
+								uci.unset('ddns', section_id, "ip_script");
+								break;
+							default:
+								break;
+						};
+
+						return uci.set('ddns', section_id, 'ip_source', formvalue);
+					};
+
+					const addSourceDepends = function(o, source) {
+						o.depends("_ip_source_v4", source);
+						o.depends("_ip_source_v6", source);
+					};
+
+					o = s.taboption('advanced', form.ListValue, '_ip_source_v4',
 						_("IP address source"),
 						_("Method used to determine the system IP-Address to send in updates"));
 					o.modalonly = true;
@@ -809,39 +862,60 @@ return view.extend({
 					o.value("web", _("URL"));
 					o.value("interface", _("Interface"));
 					o.value("script", _("Script"));
-					o.write = function(section_id, formvalue) {
-						switch(formvalue) {
-							case 'network':
-								uci.unset('ddns', section_id, "ip_url");
-								uci.unset('ddns', section_id, "ip_interface");
-								uci.unset('ddns', section_id, "ip_script");
-								break;
-							case 'web':
-								uci.unset('ddns', section_id, "ip_network");
-								uci.unset('ddns', section_id, "ip_interface");
-								uci.unset('ddns', section_id, "ip_script");
-								break;
-							case 'interface':
-								uci.unset('ddns', section_id, "ip_network");
-								uci.unset('ddns', section_id, "ip_url");
-								uci.unset('ddns', section_id, "ip_script");
-								break;
-							case 'script':
-								uci.unset('ddns', section_id, "ip_network");
-								uci.unset('ddns', section_id, "ip_url");
-								uci.unset('ddns', section_id, "ip_interface");
-								break;
-							default:
-								break;
-						};
-
-						return uci.set('ddns', section_id, 'ip_source', formvalue )
+					o.cfgvalue = function(section_id) {
+						return uci.get('ddns', section_id, 'ip_source') || 'network';
 					};
+					o.write = writeIPSource;
+					o.depends({ service_name: service, use_ipv6: "0" });
+
+					o = s.taboption('advanced', form.ListValue, '_ip_source_v6',
+						_("IP address source"),
+						_("Method used to determine the system IP-Address to send in updates"));
+					o.modalonly = true;
+					o.default = "network";
+					o.value("network", _("Network"));
+					o.value("web", _("URL"));
+					o.value("interface", _("Interface"));
+					o.value("script", _("Script"));
+					o.value("mac", _("MAC Address"));
+					o.cfgvalue = function(section_id) {
+						return uci.get('ddns', section_id, 'ip_source') || 'network';
+					};
+					o.write = writeIPSource;
+					o.depends({ service_name: service, use_ipv6: "1" });
+
+					o = s.taboption('advanced', form.ListValue, 'ip_mac',
+						_("MAC Address"),
+						_("Set the device MAC address used to read the system IP address"));
+					o.modalonly = true;
+					o.rmempty = false;
+					o.datatype = 'macaddr';
+					o.cfgvalue = function(section_id) {
+						return (uci.get('ddns', section_id, 'ip_mac') || '').toUpperCase();
+					};
+					o.depends({ _ip_source_v6: "mac", use_ipv6: "1" });
+
+					const mac_hints = _this.host_hints ? _this.host_hints.getMACHints(true) : [];
+					const seen_macs = {};
+					for (let [mac] of mac_hints) {
+						const normalized = mac.toUpperCase();
+						const hostname = _this.host_hints.getHostnameByMACAddr(mac) || _('Unknown device');
+						o.value(normalized, '%s — %s'.format(hostname, normalized));
+						seen_macs[normalized] = true;
+					}
+
+					const configured_mac = uci.get('ddns', section_id, 'ip_mac');
+					if (configured_mac) {
+						const normalized = configured_mac.toUpperCase();
+						if (!seen_macs[normalized])
+							o.value(normalized, '%s — %s'.format(_('Unknown device'), normalized));
+					}
+
 
 					o = s.taboption('advanced', widgets.NetworkSelect, 'ip_network',
 						_("Network"),
 						_("Defines the network to read systems IP-Address from"));
-					o.depends('ip_source','network');
+					addSourceDepends(o, "network");
 					o.modalonly = true;
 					o.default = 'wan';
 					o.multiple = false;
@@ -853,14 +927,14 @@ return view.extend({
 						String.format('%s %s', _('Example for IPv4'), ': http://checkip.dyndns.com')
 						+ '<br />' +
 						String.format('%s %s', _('Example for IPv6'), ': http://checkipv6.dyndns.com'));
-					o.depends("ip_source", "web")
+					addSourceDepends(o, "web")
 					o.modalonly = true;
 
 					o = s.taboption('advanced', widgets.DeviceSelect, 'ip_interface',
 						_("Interface"),
 						_("Defines the interface to read systems IP-Address from"));
 					o.modalonly = true;
-					o.depends("ip_source", "interface")
+					addSourceDepends(o, "interface")
 					o.multiple = false;
 					o.default = wan_interface;
 
@@ -868,7 +942,7 @@ return view.extend({
 						_("Script"),
 						_("User defined script to read system IP-Address"));
 					o.modalonly = true;
-					o.depends("ip_source", "script")
+					addSourceDepends(o, "script")
 					o.placeholder = "/path/to/script.sh"
 
 					o = s.taboption('advanced', widgets.NetworkSelect, 'interface',
@@ -878,22 +952,25 @@ return view.extend({
 					o.multiple = false;
 					o.default = 'wan';
 					o.rmempty = false;
-					o.depends("ip_source", "web");
-					o.depends("ip_source", "script");
-					o.depends("ip_source", "interface");
+					addSourceDepends(o, "web");
+					addSourceDepends(o, "script");
+					addSourceDepends(o, "interface");
+					o.depends("_ip_source_v6", "mac");
 
 					o = s.taboption('advanced', form.DummyValue, '_interface',
 						_("Event Network"),
 						_("Network on which the ddns-updater scripts will be started"));
-					o.depends("ip_source", "network");
+					addSourceDepends(o, "network");
 					o.forcewrite = true;
 					o.modalonly = true;
 					o.cfgvalue = function(section_id) {
 						return uci.get('ddns', section_id, 'interface') || _('This will be autoset to the selected interface');
 					};
 					o.write = function(section_id) {
-						const opt = this.section.formvalue(section_id, 'ip_source');
-						const val = this.section.formvalue(section_id, 'ip_'+opt);
+						const source = use_ipv6.formvalue(section_id) == '1'
+							? this.section.formvalue(section_id, '_ip_source_v6')
+							: this.section.formvalue(section_id, '_ip_source_v4');
+						const val = this.section.formvalue(section_id, 'ip_'+source);
 						return uci.set('ddns', section_id, 'interface', val);
 					};
 
@@ -1098,6 +1175,9 @@ return view.extend({
 					case 'update_script':
 					case 'update_url':
 					case 'lookup_host':
+					case '_ip_source_v4':
+					case '_ip_source_v6':
+					case 'ip_mac':
 						continue;
 
 					default:
