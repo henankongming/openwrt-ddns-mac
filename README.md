@@ -71,59 +71,83 @@ ip -6 neigh show | grep -i 'lladdr AA:BB:CC:DD:EE:FF'
 
 ## 获取源码
 
-如果还没有 OpenWrt 源码，可以先准备标准 OpenWrt 编译环境和源码，然后进入 OpenWrt 源码根目录。
+以下命令适用于常见的 OpenWrt 源码树：LuCI 和 packages 分别位于 `feeds/luci`、`feeds/packages`，并且你已经在 OpenWrt 源码根目录中准备好了本项目的 `patches/` 目录。
 
-本项目中的补丁需要分别作用于：
-
-- `luci-app-ddns`：OpenWrt 的 `luci` feed
-- `ddns-scripts`：OpenWrt 的 `packages` feed
-
-如果使用标准 OpenWrt 源码树，通常目录结构类似：
+目录结构应类似：
 
 ```text
 openwrt/
-├── package/
 ├── feeds/
-├── luci/
-└── ...
+│   ├── luci/
+│   │   └── applications/luci-app-ddns/
+│   └── packages/
+│       └── net/ddns-scripts/
+└── patches/
+    ├── 0001-luci-app-ddns-ipv6-mac.patch
+    └── 0002-ddns-scripts-ipv6-mac.patch
 ```
 
-实际目录位置取决于你的 OpenWrt 源码和 feed 管理方式。
+如果本项目仓库没有放在 `~/openwrt/patches`，请把下面命令中的 `../../patches/` 改成你实际存放补丁文件的路径。可先在 OpenWrt 根目录运行 `ls patches/` 确认补丁文件存在。
 
 ## 应用补丁
 
-进入 **OpenWrt 源码根目录**，执行：
+**不要在 OpenWrt 源码根目录直接应用这两个补丁。** 两个补丁的路径前缀不同，必须分别进入对应 feed 的 Git 仓库目录：
+
+### 1. 应用 LuCI 补丁
+
+先进入 LuCI feed 根目录：
 
 ```sh
-patch -p1 < /path/to/openwrt-ddns-mac/patches/0001-luci-app-ddns-ipv6-mac.patch
-patch -p1 < /path/to/openwrt-ddns-mac/patches/0002-ddns-scripts-ipv6-mac.patch
+cd ~/openwrt/feeds/luci
 ```
 
-如果你已经把本项目目录放在 OpenWrt 源码根目录下，则可以使用：
+先做预检查（不会修改文件）：
 
 ```sh
-patch -p1 < patches/0001-luci-app-ddns-ipv6-mac.patch
-patch -p1 < patches/0002-ddns-scripts-ipv6-mac.patch
+patch --dry-run -p1 < ../../patches/0001-luci-app-ddns-ipv6-mac.patch
 ```
+
+预检查没有报错后，再正式应用：
+
+```sh
+patch -p1 < ../../patches/0001-luci-app-ddns-ipv6-mac.patch
+```
+
+### 2. 应用 ddns-scripts 补丁
+
+再进入 packages feed 根目录：
+
+```sh
+cd ~/openwrt/feeds/packages
+```
+
+先做预检查：
+
+```sh
+patch --dry-run -p1 < ../../patches/0002-ddns-scripts-ipv6-mac.patch
+```
+
+预检查没有报错后，再正式应用：
+
+```sh
+patch -p1 < ../../patches/0002-ddns-scripts-ipv6-mac.patch
+```
+
+> 如果你的 OpenWrt 源码目录不是 `~/openwrt`，请把上面的绝对路径换成自己的源码目录。执行每条命令前，可以用 `pwd` 确认当前目录。
 
 ### 检查补丁是否正确应用
 
-正常情况下，`patch` 应该显示各文件成功应用，没有 `FAILED`。
-
-可以检查关键内容：
+从对应 feed 目录检查文件：
 
 ```sh
-grep -n 'ip_source.*mac' net/ddns-scripts/files/usr/lib/ddns/dynamic_dns_functions.sh
-grep -n 'ip_mac' net/ddns-scripts/files/usr/lib/ddns/dynamic_dns_functions.sh
-```
-
-LuCI 部分可以检查：
-
-```sh
+# 在 ~/openwrt/feeds/luci 下执行
 grep -n 'MAC Address' applications/luci-app-ddns/htdocs/luci-static/resources/view/ddns/overview.js
+
+# 在 ~/openwrt/feeds/packages 下执行
+grep -n 'get_ipv6_by_mac\|ip_source.*mac\|ip_mac' net/ddns-scripts/files/usr/lib/ddns/dynamic_dns_functions.sh
 ```
 
-如果补丁无法应用，通常表示当前 `luci` / `packages` 源码与本项目补丁基线不同。不要强行忽略 `patch` 的冲突，应先确认源码版本，再手工适配补丁。
+如果 `patch --dry-run` 提示找不到文件或出现冲突，先确认当前目录和文件路径是否正确，再确认 LuCI/packages 源码版本是否与补丁兼容。不要在未检查的情况下强行继续。
 
 ## 编译
 
@@ -476,14 +500,17 @@ ip -6 neigh show
 
 如果需要恢复原始 OpenWrt 行为，最简单的方法是使用干净的 OpenWrt 源码重新编译。
 
-如果补丁已经应用但尚未修改其它内容，也可以尝试：
+如果补丁已经应用且相关文件没有其它改动，必须分别进入对应 feed 目录回滚：
 
 ```sh
-patch -R -p1 < patches/0002-ddns-scripts-ipv6-mac.patch
-patch -R -p1 < patches/0001-luci-app-ddns-ipv6-mac.patch
+cd ~/openwrt/feeds/packages
+patch -R -p1 < ../../patches/0002-ddns-scripts-ipv6-mac.patch
+
+cd ~/openwrt/feeds/luci
+patch -R -p1 < ../../patches/0001-luci-app-ddns-ipv6-mac.patch
 ```
 
-如果补丁与当前源码状态不一致，不建议强行回滚，直接重新检出干净的 `luci` / `packages` 源码更安全。
+如果补丁与当前源码状态不一致，不建议强行回滚；使用干净的 `luci` / `packages` 源码重新开始更安全。
 
 ## 补丁内容概览
 
