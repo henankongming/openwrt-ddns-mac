@@ -120,7 +120,7 @@ diff --git a/net/ddns-scripts/files/usr/lib/ddns/dynamic_dns_lucihelper.sh b/net
  use_https=0		# not needed but must be set
  
 -while getopts ":6d:fghi:l:n:p:s:S:tu:Lv:V" OPT; do
-+while getopts ":6d:fghmi:l:n:p:s:S:tu:Lv:V" OPT; do
++while getopts ":6d:fghm:i:l:n:p:s:S:tu:Lv:V" OPT; do
  	case "$OPT" in
  		6)	use_ipv6=1;;
  		d)	dns_server="$OPTARG";;
