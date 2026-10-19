@@ -92,7 +92,7 @@ diff --git a/net/ddns-scripts/files/usr/lib/ddns/dynamic_dns_functions.sh b/net/
 +		cut -f4-)
 +
 +	[ -n "$__CANDIDATES" ] || {
-+		write_log 3 "No active IPv6 neighbor found for MAC '$ip_mac'"
++		write_log 3 "No usable IPv6 neighbor found for MAC '$ip_mac'"
 +		return 1
 +	}
 +
