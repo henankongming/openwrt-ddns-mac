@@ -335,10 +335,10 @@ Current IPv6 '2001:db8:...' detected for MAC 'AA:BB:CC:DD:EE:FF'
 如果没有活动邻居，会出现类似：
 
 ```text
-No active IPv6 neighbor found for MAC 'AA:BB:CC:DD:EE:FF'
+No usable IPv6 neighbor found for MAC 'AA:BB:CC:DD:EE:FF'
 ```
 
-这时不会拿 `STALE` 等旧缓存地址作为结果。
+如果只有 `STALE` 等低优先级状态，也会尝试使用该地址；`FAILED` 和 `INCOMPLETE` 不会被采用。
 
 ## 为什么有 MAC，但找不到 IPv6？
 
@@ -406,7 +406,7 @@ Linux IPv6 neighbor table 本身没有一个可靠的字段告诉本补丁“这
 2. 过滤不可用地址；
 3. 过滤不允许的 ULA；
 4. 只接受活动邻居状态；
-5. 按 `REACHABLE → DELAY → PROBE` 排序；
+5. 按 `REACHABLE → DELAY → PROBE → PERMANENT → STALE → NOARP` 排序；
 6. 同等级情况下按 IPv6 地址排序；
 7. 取第一个候选。
 
