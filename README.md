@@ -28,7 +28,7 @@ ip_source=mac
 ip -6 neigh show
         │
         ├─ 按 MAC 地址匹配
-        ├─ 只接受 REACHABLE / DELAY / PROBE
+        ├─ 优先选择 REACHABLE / DELAY / PROBE，并接受 PERMANENT / STALE / NOARP
         ├─ 排除 :: / ::1
         ├─ 排除 link-local（fe80::/10）
         ├─ 排除 multicast（ff00::/8）
@@ -41,7 +41,7 @@ ip -6 neigh show
 ddns-scripts 执行正常的 DDNS 更新
 ```
 
-实现会优先选择 `REACHABLE`，其次 `DELAY`，最后 `PROBE`。如果只有 `STALE` 等非活动状态的邻居缓存，不会直接使用该旧地址更新 DDNS。
+实现优先选择 `REACHABLE`、`DELAY`、`PROBE`，同时接受 `PERMANENT`、`STALE` 和 `NOARP`。当只有 `STALE` 等状态时仍可找到地址，但会排在活动状态候选之后；`FAILED` 和 `INCOMPLETE` 不会被使用。
 
 Linux neighbor table 不提供远端 RFC 4941 临时地址标志，因此本项目**无法仅凭 neighbor table 判断某个 IPv6 是否为临时地址**。如果一个 MAC 同时存在多个候选 IPv6，当前实现按活动状态和地址排序选择一个候选地址。
 
@@ -356,24 +356,13 @@ ip -6 neigh show | grep -i 'lladdr AA:BB:CC:DD:EE:FF'
 
 重点确认邻居状态。
 
-本实现只接受：
+本实现优先选择：
 
 ```text
-REACHABLE
-DELAY
-PROBE
+REACHABLE → DELAY → PROBE → PERMANENT → STALE → NOARP
 ```
 
-以下状态不会被直接使用：
-
-```text
-STALE
-FAILED
-INCOMPLETE
-NOARP
-```
-
-因此，如果目标设备长时间没有通信，neighbor table 中可能只剩 `STALE`，此时 DDNS 更新会失败，而不是错误地继续使用可能已经失效的 IPv6。
+`FAILED` 和 `INCOMPLETE` 会被排除。`STALE` 表示邻居缓存尚未重新确认可达性，但仍可能是目标设备当前使用的地址；如果它是唯一可用候选，本实现会使用它，而不是直接判定查找失败。
 
 可以先让目标设备产生 IPv6 流量，再重新检查：
 
@@ -490,11 +479,9 @@ ip -6 neigh show
 
 所以最终仍必须让目标设备出现在 OpenWrt 的 IPv6 neighbor table 中，并处于本实现接受的活动状态。
 
-### Q6：为什么 `STALE` 不使用？
+### Q6：为什么也会使用 `STALE`？
 
-`STALE` 只表示 neighbor cache 中仍保存着历史信息，并不能证明该地址当前仍然可用。
-
-本项目选择保守处理：只有 `REACHABLE`、`DELAY`、`PROBE` 才作为当前地址候选，避免 DDNS 被更新成离线设备的旧 IPv6。
+`STALE` 表示邻居缓存中有地址和链路层地址的记录，但近期没有确认可达性。为了避免设备长时间空闲时完全找不到地址，本实现允许 `STALE` 作为低优先级候选；活动状态的地址仍会优先选择。若需要严格确认在线状态，可先让目标设备产生 IPv6 流量，再执行查找。
 
 ## 回滚补丁
 
@@ -555,18 +542,7 @@ AA:BB:CC:DD:EE:FF
 ip -6 neigh show | grep -i 'lladdr AA:BB:CC:DD:EE:FF'
 ```
 
-确保至少有一个匹配项，并且状态是：
-
-```text
-REACHABLE
-DELAY
-```
-
-或：
-
-```text
-PROBE
-```
+确保至少有一个匹配项。`REACHABLE`、`DELAY`、`PROBE` 会优先使用；如果只有 `STALE`、`PERMANENT` 或 `NOARP`，也会作为候选处理。
 
 ### 3. 直接测试地址获取
 
@@ -597,7 +573,7 @@ ip_mac='AA:BB:CC:DD:EE:FF'
 - 本项目针对 OpenWrt 当前 master 的源码结构开发，旧版本 OpenWrt 不保证可以直接套用。
 - 补丁依赖 `luci-app-ddns`、`ddns-scripts` 当前源码结构；如果上游发生较大变化，可能需要重新适配。
 - MAC 地址只是定位邻居的条件，不代表该设备一定在线。
-- 只有 Linux neighbor table 中处于活动状态的 IPv6 邻居才会被本实现采用。
+- Linux neighbor table 中处于活动状态的 IPv6 邻居优先使用；`PERMANENT`、`STALE` 和 `NOARP` 也可作为较低优先级候选。
 - 如果目标设备使用多个 IPv6 地址，当前实现无法仅凭 neighbor table 判断哪个是 RFC 4941 temporary address。
 - DDNS 服务商本身的认证、域名、TTL、IPv6 支持等问题不属于本补丁处理范围。
 - 使用公网 IPv6 DDNS 前，请确认防火墙规则允许你期望的入站流量；DDNS 只负责 DNS 记录更新，不会自动开放路由器或内网设备端口。
