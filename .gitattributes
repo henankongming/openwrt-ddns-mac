@@ -1,0 +1,3 @@
+# Patches must keep LF line endings. A patch file converted to CRLF no longer
+# applies with `patch -p1` or `git apply` on Linux/OpenWrt.
+patches/*.patch text eol=lf
