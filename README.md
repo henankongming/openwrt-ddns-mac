@@ -25,14 +25,21 @@
 ip_source=mac
         │
         ▼
+ip -6 -o addr show dev <LAN 接口>      ← 读取当前 LAN 的 /64 前缀
+        │
+        ▼
 ip -6 neigh show
         │
-        ├─ 按 MAC 地址匹配
-        ├─ 优先选择 REACHABLE / DELAY / PROBE，并接受 PERMANENT / STALE / NOARP
+        ├─ 按 MAC 地址匹配（lladdr 后一列）
         ├─ 排除 :: / ::1
         ├─ 排除 link-local（fe80::/10）
         ├─ 排除 multicast（ff00::/8）
         └─ 根据 upd_privateip 决定是否允许 ULA（fc00::/7）
+        │
+        ▼
+分层排序，取第一个候选
+        │
+        ├─ 若候选都不在当前 /64 前缀内 → 本次不更新（安全阀）
         │
         ▼
 得到目标设备 IPv6
@@ -41,9 +48,38 @@ ip -6 neigh show
 ddns-scripts 执行正常的 DDNS 更新
 ```
 
-实现优先选择 `REACHABLE`、`DELAY`、`PROBE`，同时接受 `PERMANENT`、`STALE` 和 `NOARP`。当只有 `STALE` 等状态时仍可找到地址，但会排在活动状态候选之后；`FAILED` 和 `INCOMPLETE` 不会被使用。
+### 排序规则
 
-Linux neighbor table 不提供远端 RFC 4941 临时地址标志，因此本项目**无法仅凭 neighbor table 判断某个 IPv6 是否为临时地址**。如果一个 MAC 同时存在多个候选 IPv6，当前实现按活动状态和地址排序选择一个候选地址。
+运营商下发的 IPv6 前缀会定期变化。换前缀的那一刻，邻居表里会同时存在**旧前缀**和**新前缀**的地址，而旧地址往往仍显示为 `REACHABLE`（设备还在用它）。如果只按邻居状态排序，就会把已经失效的旧前缀地址发给 DDNS，导致记录指向不可达的地址。
+
+因此排序的第一优先项是**地址是否属于当前 LAN 配置的 /64 前缀**：
+
+| 顺序 | 排序键 | 取值与优先级 |
+|---|---|---|
+| 1 | 前缀归属 | 属于当前 LAN /64（`0`）> 不在其中（`1`） |
+| 2 | 邻居状态 | `REACHABLE` > `DELAY` > `PROBE` > `STALE` > `PERMANENT` |
+| 3 | 接口标识形态 | EUI-64（IID 中间含 `ff:fe`）> 其它 |
+| 4 | 地址数值 | 升序，保证结果不依赖内核输出顺序 |
+
+`FAILED`、`INCOMPLETE`、`NOARP` 一律不参与排序。
+
+前缀这一项排在邻居状态之前，是有意为之：一个 `STALE` 的**当前前缀**地址，比一个 `REACHABLE` 的**旧前缀**地址有用得多。
+
+### 前缀变化时的安全阀
+
+如果存在候选地址，但**没有任何候选属于当前 LAN 的 /64 前缀**，说明设备还没有拿到新前缀的地址。此时本实现记录错误并放弃本次更新，交由 ddns-scripts 原有的重试机制在稍后重试，而不是把旧前缀地址发出去。
+
+这一行为对应项目需求中“不能使用旧的 IPv6 盲目更新 DDNS”。
+
+需要指定用于读取前缀的接口。未配置时前缀检查自动关闭（退化为只按状态排序），不会导致找不到地址：
+
+```sh
+uci set ddns.nas.ip_mac_interface='br-lan'
+```
+
+### 关于临时地址
+
+Linux neighbor table 不提供远端 RFC 4941 临时地址标志，因此本项目**无法可靠判断某个 IPv6 是否为临时地址**。EUI-64 地址由硬件地址派生，是最稳定的形态，所以排在其它形式之前；但这只是**优先级偏好**，不会排除任何合法候选。
 
 ## 前置条件
 
@@ -283,7 +319,15 @@ config service 'nas'
     option interface 'wan'
     option ip_source 'mac'
     option ip_mac 'AA:BB:CC:DD:EE:FF'
+    option ip_mac_interface 'br-lan'
 ```
+
+### `ip_mac_interface`
+
+`ip_mac_interface` 指定**目标设备所在的内网接口**，用于读取当前 /64 前缀，例如 `br-lan`。
+
+- 不设置时前缀检查自动关闭，退化为只按邻居状态排序。
+- 如果目标设备不在路由器直连的网段（例如接在二级路由后面），该前缀不属于此接口，会导致前缀检查失效。此时建议**不要设置** `ip_mac_interface`，或改为设置成实际承载该设备的接口。
 
 具体认证字段和 `service_name` 的取值取决于 DDNS 服务商，请以 OpenWrt 当前版本的 `ddns-scripts` 文档和服务商要求为准。
 
@@ -338,7 +382,13 @@ Current IPv6 '2001:db8:...' detected for MAC 'AA:BB:CC:DD:EE:FF'
 No usable IPv6 neighbor found for MAC 'AA:BB:CC:DD:EE:FF'
 ```
 
-如果只有 `STALE` 等低优先级状态，也会尝试使用该地址；`FAILED` 和 `INCOMPLETE` 不会被采用。
+如果只有 `STALE` 等低优先级状态，也会尝试使用该地址；`FAILED`、`INCOMPLETE`、`NOARP` 不会被采用。
+
+日志里还会出现当前读取到的前缀，便于确认配置是否正确：
+
+```text
+Current LAN /64 prefix(es): 2409:8a00:2222:3300
+```
 
 ## 为什么有 MAC，但找不到 IPv6？
 
@@ -356,13 +406,17 @@ ip -6 neigh show | grep -i 'lladdr AA:BB:CC:DD:EE:FF'
 
 重点确认邻居状态。
 
-本实现优先选择：
+如果日志出现 `No usable IPv6 neighbor found`，说明该 MAC 在邻居表里没有任何可用条目。
+
+如果日志出现 `No IPv6 neighbor for MAC '...' inside the current LAN /64 prefix ... refusing to update`，说明找到了候选地址，但它不属于当前 LAN 的 /64 前缀 —— 通常是运营商刚换了前缀，设备还没拿到新地址。这是**预期行为**，稍后会自动重试成功。
+
+状态按以下顺序优先：
 
 ```text
-REACHABLE → DELAY → PROBE → PERMANENT → STALE → NOARP
+REACHABLE → DELAY → PROBE → STALE → PERMANENT
 ```
 
-`FAILED` 和 `INCOMPLETE` 会被排除。`STALE` 表示邻居缓存尚未重新确认可达性，但仍可能是目标设备当前使用的地址；如果它是唯一可用候选，本实现会使用它，而不是直接判定查找失败。
+`FAILED`、`INCOMPLETE`、`NOARP` 会被排除。`STALE` 表示邻居缓存尚未重新确认可达性，但仍可能是目标设备当前使用的地址；如果它是当前前缀内唯一可用候选，本实现会使用它，而不是直接判定查找失败。
 
 可以先让目标设备产生 IPv6 流量，再重新检查：
 
@@ -405,10 +459,11 @@ Linux IPv6 neighbor table 本身没有一个可靠的字段告诉本补丁“这
 1. 按 MAC 过滤；
 2. 过滤不可用地址；
 3. 过滤不允许的 ULA；
-4. 只接受活动邻居状态；
-5. 按 `REACHABLE → DELAY → PROBE → PERMANENT → STALE → NOARP` 排序；
-6. 同等级情况下按 IPv6 地址排序；
-7. 取第一个候选。
+4. 按是否属于**当前 LAN /64 前缀**排序；
+5. 再按邻居状态 `REACHABLE → DELAY → PROBE → STALE → PERMANENT` 排序；
+6. 再优先 EUI-64 形式的接口标识；
+7. 最后按 IPv6 地址数值排序，取第一个；
+8. 若候选都不在当前前缀内，放弃本次更新。
 
 如果你的设备启用了隐私地址，需要结合实际网络环境验证 DDNS 最终记录是否符合预期。
 
@@ -520,7 +575,11 @@ patch -R -p1 < ../../patches/0001-luci-app-ddns-ipv6-mac.patch
 修改内容主要包括：
 
 - 增加 `get_ipv6_by_mac()`；
+- 增加 `ipv6_expand()`、`ipv6_prefix64()`、`is_ipv6_in_prefixes()`、`get_ipv6_lan_prefixes()` 辅助函数；
 - `get_current_ip()` 支持 `ip_source=mac`；
+- 新增 `ip_mac_interface` 选项，用于读取当前 LAN /64 前缀；
+- 候选排序按「前缀归属 → 邻居状态 → 接口标识形态 → 地址数值」四层进行；
+- 候选均不在当前前缀时放弃本次更新；
 - `dynamic_dns_lucihelper.sh` 增加 `-m MAC`；
 - `ddns.config_sample` 增加 MAC source 示例。
 
@@ -542,7 +601,7 @@ AA:BB:CC:DD:EE:FF
 ip -6 neigh show | grep -i 'lladdr AA:BB:CC:DD:EE:FF'
 ```
 
-确保至少有一个匹配项。`REACHABLE`、`DELAY`、`PROBE` 会优先使用；如果只有 `STALE`、`PERMANENT` 或 `NOARP`，也会作为候选处理。
+确保至少有一个匹配项。`REACHABLE`、`DELAY`、`PROBE` 会优先使用；如果只有 `STALE` 或 `PERMANENT`，也会作为候选处理；`FAILED`、`INCOMPLETE`、`NOARP` 不会被使用。
 
 ### 3. 直接测试地址获取
 
@@ -573,7 +632,9 @@ ip_mac='AA:BB:CC:DD:EE:FF'
 - 本项目针对 OpenWrt 当前 master 的源码结构开发，旧版本 OpenWrt 不保证可以直接套用。
 - 补丁依赖 `luci-app-ddns`、`ddns-scripts` 当前源码结构；如果上游发生较大变化，可能需要重新适配。
 - MAC 地址只是定位邻居的条件，不代表该设备一定在线。
-- Linux neighbor table 中处于活动状态的 IPv6 邻居优先使用；`PERMANENT`、`STALE` 和 `NOARP` 也可作为较低优先级候选。
+- Linux neighbor table 中处于活动状态的 IPv6 邻居优先使用；`STALE` 和 `PERMANENT` 也可作为较低优先级候选。
+- 运营商更换 IPv6 前缀后，属于旧前缀的地址会被自动降级，不会被发给 DDNS。
+- 读不到当前 /64 前缀时前缀检查自动关闭，行为退回纯邻居状态排序。
 - 如果目标设备使用多个 IPv6 地址，当前实现无法仅凭 neighbor table 判断哪个是 RFC 4941 temporary address。
 - DDNS 服务商本身的认证、域名、TTL、IPv6 支持等问题不属于本补丁处理范围。
 - 使用公网 IPv6 DDNS 前，请确认防火墙规则允许你期望的入站流量；DDNS 只负责 DNS 记录更新，不会自动开放路由器或内网设备端口。
